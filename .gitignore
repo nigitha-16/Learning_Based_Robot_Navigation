@@ -1,0 +1,6 @@
+Data/
+dataset/
+*.rviz
+*.bag
+*.db3
+*.txt
