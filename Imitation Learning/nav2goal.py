@@ -8,6 +8,8 @@ import numpy as np
 import tensorflow as tf
 import math
 import transforms3d
+import os
+import time
 
 # Function to invert a transformation (translation + rotation)
 def invert_transform(translation, rotation):
@@ -26,7 +28,7 @@ def invert_transform(translation, rotation):
 # Function to apply the transformation (translation + rotation) to a point
 def transform_point(translation, rotation, point):
     # Convert the point to a homogeneous vector (x, y, z, 1)
-    point_homogeneous = np.array([point[0], point[1], point[2], 1.0])
+    point_homogeneous = np.array([point[0], point[1], 0.0, 1.0])
     
     # Create the translation matrix (4x4)
     translation_matrix = np.identity(4)
@@ -45,35 +47,44 @@ def transform_point(translation, rotation, point):
     # Return the transformed point (x, y, z)
     return transformed_point[:3]
 
-class VelocityPredictorNode(Node):
-    def __init__(self):
-        super().__init__('velocity_predictor')
+def transform_pose_to_base_link(translation, rotation, point_in_odom):
+    # Get the inverse of the transformation
+    translation_inv, rotation_inv = invert_transform(translation, rotation)
+    
+    # Convert the point from odom to base_link using the inverted transformation
+    point_in_base_link = transform_point(translation_inv, rotation_inv, point_in_odom)
+    
+    return point_in_base_link
 
+class VelocityPredictorNode(Node):
+    def __init__(self, model_path):
+        super().__init__('velocity_predictor')
+        print(os.getcwd())
         # Load the trained TensorFlow model
-        self.model = tf.keras.models.load_model('path_to_your_model.h5')
+        self.model = tf.keras.models.load_model(model_path)
 
         # Subscribe to laser scan, odometry, and goal position data
         self.laser_sub = self.create_subscription(
             LaserScan,
             '/scan',
             self.laser_callback,
-            10)
+            1)
         
         self.odom_sub = self.create_subscription(
             Odometry,
             '/odom',
             self.odom_callback,
-            10)
+            1)
         
         self.tf_sub = self.create_subscription(
             TFMessage,
             '/tf',
             self.tf_callback,
-            10)
+            1)
         
         self.goal_sub = self.create_subscription(
             PoseStamped,
-            '/goal',
+            '/goal_pose',
             self.goal_callback,
             10)
         
@@ -82,16 +93,20 @@ class VelocityPredictorNode(Node):
 
         # Data storage
         self.laser_data = None
-        self.odom_data = None
-        self.goal_position = None  # (x, y) relative to the robot's frame
+        self.robot_position = None
+        self.robot_orientation = None
+        self.goal_data = None  
+        self.translation = None
+        self.rotation =None
+        self.goal_data_rel = None
     
     def laser_callback(self, msg):
         """Callback for laser scan data"""
         # Convert laser scan to numpy array
         ranges = np.array(msg.ranges, dtype=np.float32)
-        ranges = np.nan_to_num(ranges, nan=10.0, posinf=10.0, neginf=0.0)
+        ranges = np.nan_to_num(ranges, nan=100.0, posinf=100.0, neginf=100.0)
         self.laser_data = ranges
-        self.predict_velocity()
+        
         
     def tf_callback(self, msg):
         """Callback for tf data"""
@@ -103,6 +118,8 @@ class VelocityPredictorNode(Node):
                 self.translation = [translation.x, translation.y, translation.z]
                 rotation = transform.transform.rotation
                 self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
+                
+                self.predict_velocity()
 
         
     def odom_callback(self, msg):
@@ -110,67 +127,50 @@ class VelocityPredictorNode(Node):
         # Extract position and orientation from odometry message
         self.robot_position = (msg.pose.pose.position.x, msg.pose.pose.position.y)
         self.robot_orientation = msg.pose.pose.orientation
-        self.linear_velocity = msg.twist.twist.linear
-        self.angular_velocity = msg.twist.twist.angular
-
-        # Create odom data array
-        self.odom_data = np.array([
-            self.robot_position[0], self.robot_position[1],
-            self.robot_orientation.x, self.robot_orientation.y, self.robot_orientation.z, self.robot_orientation.w,
-            self.linear_velocity.x, self.linear_velocity.y, self.linear_velocity.z,
-            self.angular_velocity.x, self.angular_velocity.y, self.angular_velocity.z
-        ], dtype=np.float32)
-        
-        self.predict_velocity()
+        # self.linear_velocity = msg.twist.twist.linear
+        # self.angular_velocity = msg.twist.twist.angular   
 
     def goal_callback(self, msg):
         """Callback for goal position in odom frame (PoseStamped)"""
-        goal_x = msg.pose.position.x
-        goal_y = msg.pose.position.y
-
-        # Compute goal position relative to robot
-        self.goal_position = self.transform_goal_to_robot_frame(goal_x, goal_y)
-        self.predict_velocity()
-
-   
-
-
-
-    # Function to transform a point from odom to base_link frame
-    def transform_pose_to_base_link(translation, rotation, point_in_odom):
-        # Get the inverse of the transformation
-        translation_inv, rotation_inv = invert_transform(translation, rotation)
+        self.goal_data = [msg.pose.position.x, msg.pose.position.y]
         
-        # Convert the point from odom to base_link using the inverted transformation
-        point_in_base_link = transform_point(translation_inv, rotation_inv, point_in_odom)
-        
-        return point_in_base_link
+
+    
     def predict_velocity(self):
         """Predict velocity using the model"""
         # Ensure we have all necessary data: laser, odom, and goal
-        if self.laser_data is None or self.odom_data is None or self.goal_position is None:
+    
+        if self.laser_data is None or self.goal_data is None:
             return
+        if self.translation is not None:
+            # Compute goal position relative to robot
+            goal_position = transform_pose_to_base_link(self.translation, self.rotation, self.goal_data)
+            goal_distance = np.sqrt(goal_position[0] ** 2 + goal_position[1]** 2)
+            goal_angle = math.atan2(goal_position[1],goal_position[0])
+            self.goal_data_rel = [goal_distance, goal_angle]
+        else:
+            return
+        print('goal ', self.goal_data_rel)
+        laser_input = np.expand_dims(self.laser_data, axis=0)  # Add batch dimension
+        goal_input = np.expand_dims(self.goal_data_rel, axis=0)    # Add batch dimension
+
+        # Pass the inputs to the model
+        predicted_velocity = self.model.predict([laser_input, goal_input])[0]
         
-        # Combine laser, odom, and goal data into a single input for the model
-        input_data = np.concatenate([self.laser_data, self.odom_data, self.goal_position])
-        
-        # Add batch dimension (as TensorFlow models expect batches of data)
-        input_data = np.expand_dims(input_data, axis=0)
-        
-        # Predict the velocity (linear and angular)
-        predicted_velocity = self.model.predict(input_data)
-        
+                
+        print('predicted_velocity ', predicted_velocity)
         # Prepare and publish Twist message
         twist_msg = Twist()
-        twist_msg.linear.x = predicted_velocity[0, 0]  # Predicted linear velocity
-        twist_msg.angular.z = predicted_velocity[0, 1]  # Predicted angular velocity
+        twist_msg.linear.x = float(predicted_velocity[0])  # Predicted linear velocity
+        twist_msg.linear.y = float(predicted_velocity[1])  # Predicted linear velocity
+        twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
         
         self.cmd_vel_pub.publish(twist_msg)
-        self.get_logger().info(f"Published Velocity - Linear: {twist_msg.linear.x}, Angular: {twist_msg.angular.z}")
+        time.sleep(1)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode()
+    node = VelocityPredictorNode(model_path= 'models/goal_laser_downsampled_data_res_200epochs.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
