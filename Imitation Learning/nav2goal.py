@@ -3,7 +3,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped
+from nav_msgs.msg import Path
 from tf2_msgs.msg import TFMessage
+from std_msgs.msg import Header
 import numpy as np
 import tensorflow as tf
 import math
@@ -88,7 +90,8 @@ class VelocityPredictorNode(Node):
             '/goal_pose',
             self.goal_callback,
             10)
-        
+        # Publisher for the path
+        self.path_pub = self.create_publisher(Path, '/robot_path', 10)
         # Publisher for the velocity
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -102,7 +105,10 @@ class VelocityPredictorNode(Node):
         self.translation_odom_map = None
         self.rotation_odom_map =None
         self.goal_data_rel = None
-        self.path = []
+        self.path = []  # Store robot's path
+        self.path_msg = Path()  # Path message to be published
+        self.path_msg.header.frame_id = 'odom'  # Assuming the path is in the "map" frame
+
     
     def laser_callback(self, msg):
         """Callback for laser scan data"""
@@ -187,11 +193,30 @@ class VelocityPredictorNode(Node):
         print('angle of movement', theta_new)
         
         self.cmd_vel_pub.publish(twist_msg)
-        time.sleep(0.5)
+        self.record_path()
+        self.path_pub.publish(self.path_msg)
+        time.sleep(0.3)
 
+    def record_path(self):
+        """Record the robot's position and orientation in the path message"""
+        if self.robot_position and self.robot_orientation:
+            pose_stamped = PoseStamped()
+            pose_stamped.header = Header()
+            pose_stamped.header.stamp = self.get_clock().now().to_msg()
+            pose_stamped.pose.position.x = self.robot_position[0]
+            pose_stamped.pose.position.y = self.robot_position[1]
+            pose_stamped.pose.position.z = 0.0  # Assuming a 2D path
+            pose_stamped.pose.orientation = self.robot_orientation
+            self.path_msg.poses.append(pose_stamped)
+
+            # Optionally, limit the path size to avoid excessive memory usage
+            max_path_length = 1000
+            if len(self.path_msg.poses) > max_path_length:
+                self.path_msg.poses.pop(0)
+                
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode(model_path= 'models/model_laser_07112024b.keras')
+    node = VelocityPredictorNode(model_path= 'models/model_laser_corr07112024_rescaled_outputs_a_model_epoch_200.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

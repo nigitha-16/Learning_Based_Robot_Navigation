@@ -4,6 +4,8 @@ from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped
 from tf2_msgs.msg import TFMessage
+from nav_msgs.msg import Path
+from std_msgs.msg import Header
 import numpy as np
 import tensorflow as tf
 import math
@@ -11,6 +13,7 @@ import transforms3d
 import os
 import time
 from cv_bridge import CvBridge
+import cv2
 
 # Function to invert a transformation (translation + rotation)
 def invert_transform(translation, rotation):
@@ -62,14 +65,14 @@ class VelocityPredictorNode(Node):
         super().__init__('velocity_predictor')
         print(os.getcwd())
         # Load the trained TensorFlow model
-        self.model = tf.keras.models.load_model(model_path)
-
+        self.model = tf.keras.models.load_model(model_path, compile=False)
+        print('loaded model')
         # Subscribe to laser scan, odometry, and goal position data
         self.img_sub = self.create_subscription(
             Image,
             '/camera/color/image_raw',
             self.img_callback,
-            1)
+            20)
         
         self.odom_sub = self.create_subscription(
             Odometry,
@@ -88,7 +91,8 @@ class VelocityPredictorNode(Node):
             '/goal_pose',
             self.goal_callback,
             10)
-        
+        # Publisher for the path
+        self.path_pub = self.create_publisher(Path, '/robot_path', 10)
         # Publisher for the velocity
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -103,10 +107,15 @@ class VelocityPredictorNode(Node):
         self.rotation_odom_map =None
         self.goal_data_rel = None
         self.bridge = CvBridge()
+        self.path = []  # Store robot's path
+        self.path_msg = Path()  # Path message to be published
+        self.path_msg.header.frame_id = 'odom'  # Assuming the path is in the "map" frame
+
     
     def img_callback(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        self.image = cv_image
+        self.image = cv2.resize(cv_image, (224, 224))
+        self.predict_velocity()
         
         
     def tf_callback(self, msg):
@@ -127,7 +136,7 @@ class VelocityPredictorNode(Node):
                     rotation = transform.transform.rotation
                     self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
                     
-                    self.predict_velocity()
+                    
 
         
     def odom_callback(self, msg):
@@ -175,10 +184,30 @@ class VelocityPredictorNode(Node):
         twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
         
         self.cmd_vel_pub.publish(twist_msg)
+        self.record_path()
+        self.path_pub.publish(self.path_msg)
+        time.sleep(0.5)
+        
+    def record_path(self):
+        """Record the robot's position and orientation in the path message"""
+        if self.robot_position and self.robot_orientation:
+            pose_stamped = PoseStamped()
+            pose_stamped.header = Header()
+            pose_stamped.header.stamp = self.get_clock().now().to_msg()
+            pose_stamped.pose.position.x = self.robot_position[0]
+            pose_stamped.pose.position.y = self.robot_position[1]
+            pose_stamped.pose.position.z = 0.0  # Assuming a 2D path
+            pose_stamped.pose.orientation = self.robot_orientation
+            self.path_msg.poses.append(pose_stamped)
+
+            # Optionally, limit the path size to avoid excessive memory usage
+            max_path_length = 1000
+            if len(self.path_msg.poses) > max_path_length:
+                self.path_msg.poses.pop(0)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode(model_path= 'models/corr1_goal_img_downsampled_data_res_200epochs.keras')
+    node = VelocityPredictorNode(model_path= 'models/model_img_corr1_a_model_epoch_50.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
