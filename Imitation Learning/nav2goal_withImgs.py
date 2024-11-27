@@ -48,14 +48,14 @@ def transform_point(translation, rotation, point):
     # Return the transformed point (x, y, z)
     return transformed_point[:3]
 
-def transform_pose_to_base_link(translation, rotation, point_in_odom):
+def transform_pose(translation, rotation, point_in_odom):
     # Get the inverse of the transformation
     translation_inv, rotation_inv = invert_transform(translation, rotation)
     
     # Convert the point from odom to base_link using the inverted transformation
-    point_in_base_link = transform_point(translation_inv, rotation_inv, point_in_odom)
+    point_transformed = transform_point(translation_inv, rotation_inv, point_in_odom)
     
-    return point_in_base_link
+    return point_transformed
 
 class VelocityPredictorNode(Node):
     def __init__(self, model_path):
@@ -99,6 +99,8 @@ class VelocityPredictorNode(Node):
         self.goal_data = None  
         self.translation = None
         self.rotation =None
+        self.translation_odom_map = None
+        self.rotation_odom_map =None
         self.goal_data_rel = None
         self.bridge = CvBridge()
     
@@ -111,14 +113,21 @@ class VelocityPredictorNode(Node):
         """Callback for tf data"""
         for transform in msg.transforms:
             # Check if the transform is from odom to base_link
-            if transform.child_frame_id == 'base_link' and transform.header.frame_id == 'odom':
+            if transform.child_frame_id == 'odom' and transform.header.frame_id == 'map':
                 # Extract translation and rotation
                 translation = transform.transform.translation
-                self.translation = [translation.x, translation.y, translation.z]
+                self.translation_odom_map = [translation.x, translation.y, translation.z]
                 rotation = transform.transform.rotation
-                self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
-                
-                self.predict_velocity()
+                self.rotation_odom_map = [rotation.x, rotation.y, rotation.z, rotation.w]
+            if self.translation_odom_map is not None:
+                if transform.child_frame_id == 'base_link' and transform.header.frame_id == 'odom':
+                    # Extract translation and rotation
+                    translation = transform.transform.translation
+                    self.translation = [translation.x, translation.y, translation.z]
+                    rotation = transform.transform.rotation
+                    self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
+                    
+                    self.predict_velocity()
 
         
     def odom_callback(self, msg):
@@ -143,7 +152,8 @@ class VelocityPredictorNode(Node):
             return
         if self.translation is not None:
             # Compute goal position relative to robot
-            goal_position = transform_pose_to_base_link(self.translation, self.rotation, self.goal_data)
+            goal_position = transform_pose(self.translation_odom_map, self.rotation_odom_map, self.goal_data)
+            goal_position = transform_pose(self.translation, self.rotation, goal_position)
             goal_distance = np.sqrt(goal_position[0] ** 2 + goal_position[1]** 2)
             goal_angle = math.atan2(goal_position[1],goal_position[0])
             self.goal_data_rel = [goal_distance, goal_angle]
@@ -165,7 +175,6 @@ class VelocityPredictorNode(Node):
         twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
         
         self.cmd_vel_pub.publish(twist_msg)
-        time.sleep(0.5)
 
 def main(args=None):
     rclpy.init(args=args)

@@ -10,6 +10,7 @@ import math
 import transforms3d
 import os
 import time
+import math
 
 # Function to invert a transformation (translation + rotation)
 def invert_transform(translation, rotation):
@@ -47,21 +48,21 @@ def transform_point(translation, rotation, point):
     # Return the transformed point (x, y, z)
     return transformed_point[:3]
 
-def transform_pose_to_base_link(translation, rotation, point_in_odom):
+def transform_pose(translation, rotation, point_in_odom):
     # Get the inverse of the transformation
     translation_inv, rotation_inv = invert_transform(translation, rotation)
     
     # Convert the point from odom to base_link using the inverted transformation
-    point_in_base_link = transform_point(translation_inv, rotation_inv, point_in_odom)
+    point_transformed = transform_point(translation_inv, rotation_inv, point_in_odom)
     
-    return point_in_base_link
+    return point_transformed
 
 class VelocityPredictorNode(Node):
     def __init__(self, model_path):
         super().__init__('velocity_predictor')
         print(os.getcwd())
         # Load the trained TensorFlow model
-        self.model = tf.keras.models.load_model(model_path)
+        self.model = tf.keras.models.load_model(model_path, compile=False)
 
         # Subscribe to laser scan, odometry, and goal position data
         self.laser_sub = self.create_subscription(
@@ -98,7 +99,10 @@ class VelocityPredictorNode(Node):
         self.goal_data = None  
         self.translation = None
         self.rotation =None
+        self.translation_odom_map = None
+        self.rotation_odom_map =None
         self.goal_data_rel = None
+        self.path = []
     
     def laser_callback(self, msg):
         """Callback for laser scan data"""
@@ -112,14 +116,21 @@ class VelocityPredictorNode(Node):
         """Callback for tf data"""
         for transform in msg.transforms:
             # Check if the transform is from odom to base_link
-            if transform.child_frame_id == 'base_link' and transform.header.frame_id == 'odom':
+            if transform.child_frame_id == 'odom' and transform.header.frame_id == 'map':
                 # Extract translation and rotation
                 translation = transform.transform.translation
-                self.translation = [translation.x, translation.y, translation.z]
+                self.translation_odom_map = [translation.x, translation.y, translation.z]
                 rotation = transform.transform.rotation
-                self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
-                
-                self.predict_velocity()
+                self.rotation_odom_map = [rotation.x, rotation.y, rotation.z, rotation.w]
+            if self.translation_odom_map is not None:
+                if transform.child_frame_id == 'base_link' and transform.header.frame_id == 'odom':
+                    # Extract translation and rotation
+                    translation = transform.transform.translation
+                    self.translation = [translation.x, translation.y, translation.z]
+                    rotation = transform.transform.rotation
+                    self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
+                    
+                    self.predict_velocity()
 
         
     def odom_callback(self, msg):
@@ -141,10 +152,12 @@ class VelocityPredictorNode(Node):
         # Ensure we have all necessary data: laser, odom, and goal
     
         if self.laser_data is None or self.goal_data is None:
+            
             return
         if self.translation is not None:
             # Compute goal position relative to robot
-            goal_position = transform_pose_to_base_link(self.translation, self.rotation, self.goal_data)
+            goal_position = transform_pose(self.translation_odom_map, self.rotation_odom_map, self.goal_data)
+            goal_position = transform_pose(self.translation, self.rotation, goal_position)
             goal_distance = np.sqrt(goal_position[0] ** 2 + goal_position[1]** 2)
             goal_angle = math.atan2(goal_position[1],goal_position[0])
             self.goal_data_rel = [goal_distance, goal_angle]
@@ -161,16 +174,24 @@ class VelocityPredictorNode(Node):
         print('predicted_velocity ', predicted_velocity)
         # Prepare and publish Twist message
         twist_msg = Twist()
-        twist_msg.linear.x = float(predicted_velocity[0])  # Predicted linear velocity
-        twist_msg.linear.y = float(predicted_velocity[1])  # Predicted linear velocity
+        twist_msg.linear.x = float(predicted_velocity[0]) # Predicted linear velocity
+        twist_msg.linear.y = float(predicted_velocity[1])# Predicted linear velocity
         twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
+        theta = math.atan2(predicted_velocity[1], predicted_velocity[0])
+    
+        # Update the direction based on angular velocity
+        theta_new = theta + predicted_velocity[2] 
+    
+        # Normalize theta_new to the range [-pi, pi]
+        theta_new = math.atan2(math.sin(theta_new), math.cos(theta_new))
+        print('angle of movement', theta_new)
         
         self.cmd_vel_pub.publish(twist_msg)
-        time.sleep(1)
+        time.sleep(0.5)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode(model_path= 'models/goal_laser_downsampled_data_res_200epochs.keras')
+    node = VelocityPredictorNode(model_path= 'models/model_laser_07112024b.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
