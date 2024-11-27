@@ -1,0 +1,19 @@
+root_dir: "/work/nselva2s/rnd"
+tfrecord_file: "robile_data_corr_07112024/tfrecords/corr_07112024_withImages_resized_rescaled_outputs.tfrecord"
+log_dir: "ImitationLearning_logs/fit/corr07112024_rescaled_outputs_img_laser_"
+model_name: "model_img_laser_corr07112024_rescaled_outputs_a"
+model_save_path: "ImitationLearning_models"
+
+# Training parameters
+train_size: 0.7
+val_size: 0.2
+batch_size: 128
+epochs: 200
+train_steps: 1000
+val_steps: 300
+
+# Learning rate scheduler parameters
+initial_learning_rate: 0.005
+decay_steps: 10000
+decay_rate: 0.96
+minimum_learning_rate: 0.001

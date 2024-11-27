@@ -13,15 +13,16 @@ import transforms3d
 from tensorflow.keras.models import Model
 import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.layers import BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
 from tensorflow.keras.initializers import HeNormal
 from tensorflow.keras import Model, Input, regularizers
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
 from sklearn.model_selection import train_test_split
 
+
 class DatasetLoader:
-    def __init__(self, tfrecord_file, image_shape=[224, 224, 3], lasers_shape=513, goal_shape=2, motion_command_shape=3):
+    def __init__(self, tfrecord_file, image_shape=[480, 640, 3], lasers_shape=513, goal_shape=2, motion_command_shape=3):
         self.tfrecord_file = tfrecord_file
         self.image_shape = image_shape
         self.lasers_shape = lasers_shape
@@ -29,21 +30,20 @@ class DatasetLoader:
         self.motion_command_shape = motion_command_shape
         self.dataset_length = self._get_dataset_length()
 
-    def _parse_function_with_images(self, proto):
+    def _parse_with_lasers_function(self,proto):
+        image_shape = [480, 640, 3]
+        lasers_shape = 513  # Replace with the actual shape
+        current_pose_shape = 3  # Replace with the actual shape
+        goal_pose_shape = 3  # Replace with the actual shape
+        motion_command_shape = 3  # Replace with the actual shape
+        goal_shape = 2
         features = {
-            'image': tf.io.FixedLenFeature([], tf.string),  # Raw serialized image
-            'goal': tf.io.FixedLenFeature([self.goal_shape], tf.float32),
-            'motion_command': tf.io.FixedLenFeature([self.motion_command_shape], tf.float32)
+            'laser': tf.io.FixedLenFeature([lasers_shape], tf.float32),
+            'goal': tf.io.FixedLenFeature([goal_shape], tf.float32),
+            'motion_command': tf.io.FixedLenFeature([motion_command_shape], tf.float32)
         }
-        
-        # Parse the input `proto` based on the defined features
-        parsed_features = tf.io.parse_single_example(proto, features)    
-
-        # Deserialize and reshape the raw image tensor
-        image = tf.io.parse_tensor(parsed_features['image'], out_type=tf.uint8)
-        image = tf.reshape(image, self.image_shape)
-        
-        return (image, parsed_features['goal']), parsed_features['motion_command']
+        parsed_features = tf.io.parse_single_example(proto, features)
+        return  (parsed_features['laser'], parsed_features['goal']), parsed_features['motion_command']
 
     def _get_dataset_length(self):
         dataset = tf.data.TFRecordDataset(self.tfrecord_file)
@@ -62,8 +62,9 @@ class DatasetLoader:
 
     def load_dataset(self):
         dataset = tf.data.TFRecordDataset(self.tfrecord_file)
-        dataset = dataset.skip(1).map(self._parse_function_with_images, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.skip(1).map(self._parse_with_lasers_function, num_parallel_calls=tf.data.AUTOTUNE)
         return dataset
+
 
     def split_dataset(self, dataset, train_size=0.7, val_size=0.2):
         num_elements = self.dataset_length
@@ -86,6 +87,7 @@ class DatasetLoader:
 
     def get_prepared_datasets(self, train_size=0.7, val_size=0.2, batch_size=128):
         dataset = self.load_dataset()
+        
         train_dataset, val_dataset, test_dataset = self.split_dataset(dataset, train_size, val_size)
         del dataset
         train_dataset = self.preprocess_and_augment(train_dataset, batch_size)
@@ -93,6 +95,7 @@ class DatasetLoader:
         test_dataset = self.preprocess_and_augment(test_dataset, batch_size)
         
         return train_dataset, val_dataset, test_dataset
+
 
 class CustomExponentialDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, initial_learning_rate, decay_steps, decay_rate, minimum_learning_rate, staircase=True):
@@ -121,82 +124,13 @@ class CustomExponentialDecay(tf.keras.optimizers.schedules.LearningRateSchedule)
             'staircase': self.staircase
         }
 
-
-class MotionCommandModel:
-    def __init__(self, image_shape, goal_shape, motion_command_shape, log_dir):
-        self.image_shape = image_shape
-        self.goal_shape = goal_shape
-        self.motion_command_shape = motion_command_shape
-        self.log_dir = log_dir
-
-        # Define normalization layers
-        self.image_rescaling = Rescaling(1./255)
-        self.goal_normalization = Normalization()
+class MotionCommandModel_withLaser:
+    def __init__(self, model_path, log_dir):
 
         # Initialize the model
-        self.model = self._create_model()
-        
-    
-    def residual_block(self, x, units):
-        shortcut = x
-        x = Dense(units, kernel_initializer=HeNormal())(x)
-        x = BatchNormalization()(x)
-        x = LeakyReLU()(x)
-
-        # Adjust shortcut if dimensions differ
-        if shortcut.shape[-1] != units:
-            shortcut = Dense(units, kernel_initializer=HeNormal())(shortcut)
-        
-        x = Add()([x, shortcut])
-        return x
-
-    def _create_model(self):
-        # Define inputs
-        goal_input = Input(shape=(self.goal_shape,), name='goal_input')
-        image_input = Input(shape=self.image_shape, name='image_input')
-
-        # Normalize inputs
-        goal_normalized = self.goal_normalization(goal_input)
-        image_rescaled = self.image_rescaling(image_input)
-
-        # Process goal with dense and residual layers
-        goal_hidden = Dense(8, kernel_initializer=HeNormal())(goal_normalized)
-        goal_hidden = BatchNormalization()(goal_hidden)
-        goal_hidden = LeakyReLU()(goal_hidden)
-        goal_hidden = self.residual_block(goal_hidden, 16)
-
-        # Load and freeze base model
-        base_model = MobileNetV2(include_top=False, weights='imagenet', input_tensor=image_rescaled)
-        base_model.trainable = False
-        
-        # Process image features
-        image_hidden = base_model.output
-        image_hidden = Flatten()(image_hidden)
-        image_hidden = Dense(128, kernel_initializer='he_normal')(image_hidden)
-        image_hidden = BatchNormalization()(image_hidden)
-        image_hidden = LeakyReLU()(image_hidden)
-        image_hidden = Dense(16, kernel_initializer='he_normal')(image_hidden)
-        image_hidden = BatchNormalization()(image_hidden)
-        image_hidden = LeakyReLU()(image_hidden)
-
-        # Concatenate processed features
-        concatenated = concatenate([goal_hidden, image_hidden])
-        hidden = Dense(128, kernel_initializer=HeNormal())(concatenated)
-        hidden = BatchNormalization()(hidden)
-        hidden = LeakyReLU()(hidden)
-        hidden = Dense(64, kernel_initializer=HeNormal())(hidden)
-        hidden = BatchNormalization()(hidden)
-        hidden = LeakyReLU()(hidden)
-        hidden = Dense(16, kernel_initializer=HeNormal())(hidden)
-        hidden = BatchNormalization()(hidden)
-        hidden = LeakyReLU()(hidden)
-
-        # Output layer
-        output = Dense(self.motion_command_shape, activation='linear', name='motion_command_output')(hidden)
-        
-        # Compile the model
-        model = Model(inputs=[image_input, goal_input], outputs=output)
-        return model
+        self.model = tf.keras.models.load_model(model_path, compile=False)
+        self.log_dir = log_dir
+  
 
     def compile_model(self, initial_learning_rate=0.005, decay_steps=5000, decay_rate=0.96, minimum_learning_rate=0.001):
         lr_schedule = CustomExponentialDecay(
@@ -219,7 +153,7 @@ class MotionCommandModel:
     def train_model(self, train_dataset, val_dataset, epochs, train_steps, val_steps, initial_learning_rate, decay_steps,
                     decay_rate, minimum_learning_rate):
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=self.log_dir, histogram_freq=1)
-        self.compile_model()
+        self.compile_model(initial_learning_rate, decay_steps, decay_rate, minimum_learning_rate)
         history = self.model.fit(
             train_dataset,
             epochs=epochs,
@@ -230,6 +164,7 @@ class MotionCommandModel:
             callbacks=[self.PrintLearningRateCallback(), tensorboard_callback]
         )
         return history
+
 
 def load_config(config_path):
     with open(config_path, 'r') as file:
@@ -256,12 +191,9 @@ if __name__ == "__main__":
 
     print('Training, validation, and test datasets created and preprocessed.')
 
-    # Usage example
-    image_shape = (224, 224, 3)
-    goal_shape = 2
-    motion_command_shape = 3
 
-    model_instance = MotionCommandModel(image_shape, goal_shape, motion_command_shape, log_dir)
+    model_path = config['model_path']
+    model_instance = MotionCommandModel_withLaser(model_path, log_dir)
     history = model_instance.train_model(train_dataset, val_dataset, epochs=config['epochs'],
                                          train_steps = config['train_steps'], val_steps = config['val_steps'],
                                         initial_learning_rate = config['initial_learning_rate'], decay_steps = config['decay_steps'],
@@ -269,6 +201,6 @@ if __name__ == "__main__":
 
     model_instance.model.save(model_save_path)
     print("Model training complete.")
-
+    
 
 
