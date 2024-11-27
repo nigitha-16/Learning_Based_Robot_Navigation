@@ -13,7 +13,7 @@ import transforms3d
 from tensorflow.keras.models import Model
 import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.layers import BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
 from tensorflow.keras.initializers import HeNormal
 from tensorflow.keras import Model, Input, regularizers
 from tensorflow.keras.applications import MobileNetV2
@@ -121,6 +121,25 @@ class CustomExponentialDecay(tf.keras.optimizers.schedules.LearningRateSchedule)
             'staircase': self.staircase
         }
 
+class ModelCheckpointEveryN(Callback):
+    def __init__(self, save_dir, model_name, save_freq=25):
+        """
+        A custom callback that saves the model every 'save_freq' epochs.
+        
+        :param save_dir: Directory to save the model.
+        :param save_freq: Number of epochs between each save.
+        """
+        super(ModelCheckpointEveryN, self).__init__()
+        self.save_dir = save_dir
+        self.save_freq = save_freq
+        self.model_name = model_name
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Save the model every 'save_freq' epochs
+        if (epoch + 1) % self.save_freq == 0:
+            model_save_path = os.path.join(self.save_dir, f"{self.model_name}_model_epoch_{epoch+1}.keras")
+            print(f"\nEpoch {epoch+1}: Saving model to {model_save_path}")
+            self.model.save(model_save_path)
 
 class MotionCommandModel:
     def __init__(self, image_shape, goal_shape, motion_command_shape, log_dir):
@@ -169,9 +188,26 @@ class MotionCommandModel:
         base_model = MobileNetV2(include_top=False, weights='imagenet', input_tensor=image_rescaled)
         base_model.trainable = False
         
-        # Process image features
-        image_hidden = base_model.output
-        image_hidden = Flatten()(image_hidden)
+        # Choose an intermediate layer from MobileNetV2
+        intermediate_layer = base_model.get_layer('block_13_expand_relu').output
+    
+        # Add custom convolutional layers on top of the intermediate output
+        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(intermediate_layer)
+        x = BatchNormalization()(x)
+        x = LeakyReLU()(x)
+        
+        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = BatchNormalization()(x)
+        x = LeakyReLU()(x)
+        
+        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = BatchNormalization()(x)
+        x = LeakyReLU()(x)
+    
+        # Global Average Pooling to reduce spatial dimensions
+        image_hidden = GlobalAveragePooling2D()(x)
+    
+        # Process the pooled features with dense layers
         image_hidden = Dense(128, kernel_initializer='he_normal')(image_hidden)
         image_hidden = BatchNormalization()(image_hidden)
         image_hidden = LeakyReLU()(image_hidden)
@@ -217,9 +253,11 @@ class MotionCommandModel:
     
 
     def train_model(self, train_dataset, val_dataset, epochs, train_steps, val_steps, initial_learning_rate, decay_steps,
-                    decay_rate, minimum_learning_rate):
+                    decay_rate, minimum_learning_rate, model_save_path, model_name):
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=self.log_dir, histogram_freq=1)
         self.compile_model()
+        model_checkpoint_callback = ModelCheckpointEveryN(save_dir=model_save_path, model_name=model_name, save_freq=25)
+
         history = self.model.fit(
             train_dataset,
             epochs=epochs,
@@ -227,7 +265,7 @@ class MotionCommandModel:
             steps_per_epoch=train_steps,  # Specify steps per epoch for training
             validation_steps=val_steps,
             verbose=1,
-            callbacks=[self.PrintLearningRateCallback(), tensorboard_callback]
+            callbacks=[self.PrintLearningRateCallback(), tensorboard_callback, model_checkpoint_callback]
         )
         return history
 
@@ -245,10 +283,12 @@ if __name__ == "__main__":
     # Load the configuration
     config = load_config(args.config)
 
-    input_dir = config['input_dir']
-    tf_file = os.path.join(input_dir, config['tfrecord_file'])
-    log_dir = config['log_dir'] + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    model_save_path = os.path.join(input_dir, config['model_save_path'])
+    root_dir = config['root_dir']
+    tf_file = os.path.join(root_dir, config['tfrecord_file'])
+    log_dir = config['log_dir'] +datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = os.path.join(root_dir, log_dir)
+    model_save_path = os.path.join(root_dir, config['model_save_path'])
+    model_name = config['model_name']
 
     loader = DatasetLoader(tf_file)
     train_dataset, val_dataset, test_dataset = loader.get_prepared_datasets(train_size = config['train_size'], val_size = config['val_size'],
@@ -265,9 +305,9 @@ if __name__ == "__main__":
     history = model_instance.train_model(train_dataset, val_dataset, epochs=config['epochs'],
                                          train_steps = config['train_steps'], val_steps = config['val_steps'],
                                         initial_learning_rate = config['initial_learning_rate'], decay_steps = config['decay_steps'],
-                                         decay_rate = config['decay_rate'], minimum_learning_rate = config['minimum_learning_rate'])
+                                         decay_rate = config['decay_rate'], minimum_learning_rate = config['minimum_learning_rate'],
+                                        model_save_path = model_save_path, model_name = model_name)
 
-    model_instance.model.save(model_save_path)
     print("Model training complete.")
 
 
