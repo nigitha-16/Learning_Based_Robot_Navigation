@@ -1,10 +1,11 @@
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped
-from tf2_msgs.msg import TFMessage
 from nav_msgs.msg import Path
+from tf2_msgs.msg import TFMessage
 from std_msgs.msg import Header
 import numpy as np
 import tensorflow as tf
@@ -12,12 +13,10 @@ import math
 import transforms3d
 import os
 import time
+import math
 from cv_bridge import CvBridge
 import cv2
 from PIL import Image as pil_image
-from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
-import tf2_geometry_msgs
-
 
 # Function to invert a transformation (translation + rotation)
 def invert_transform(translation, rotation):
@@ -70,12 +69,17 @@ class VelocityPredictorNode(Node):
         print(os.getcwd())
         # Load the trained TensorFlow model
         self.model = tf.keras.models.load_model(model_path, compile=False)
-        print('loaded model')
+
         # Subscribe to laser scan, odometry, and goal position data
         self.img_sub = self.create_subscription(
             Image,
             '/camera/camera/color/image_raw',
             self.img_callback,
+            1)
+        self.laser_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.laser_callback,
             1)
         
         self.odom_sub = self.create_subscription(
@@ -88,7 +92,7 @@ class VelocityPredictorNode(Node):
             TFMessage,
             '/tf',
             self.tf_callback,
-            10)
+            1)
         
         self.goal_sub = self.create_subscription(
             PoseStamped,
@@ -102,6 +106,7 @@ class VelocityPredictorNode(Node):
 
         # Data storage
         self.image = None
+        self.laser_data = None
         self.robot_position = None
         self.robot_orientation = None
         self.goal_data = None  
@@ -113,15 +118,18 @@ class VelocityPredictorNode(Node):
         self.bridge = CvBridge()
         self.path = []  # Store robot's path
         self.path_msg = Path()  # Path message to be published
-        self.path_msg.header.frame_id = 'map'  # Assuming the path is in the "map" frame
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.path_msg.header.frame_id = 'odom'  # Assuming the path is in the "map" frame
 
-    
     def img_callback(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         self.image = np.array(pil_image.fromarray(cv_image).resize((224, 224)))
         
+    def laser_callback(self, msg):
+        """Callback for laser scan data"""
+        # Convert laser scan to numpy array
+        ranges = np.array(msg.ranges, dtype=np.float32)
+        ranges = np.nan_to_num(ranges, nan=100.0, posinf=100.0, neginf=100.0)
+        self.laser_data = ranges
         
         
     def tf_callback(self, msg):
@@ -141,10 +149,8 @@ class VelocityPredictorNode(Node):
                     self.translation = [translation.x, translation.y, translation.z]
                     rotation = transform.transform.rotation
                     self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
-
+                    
                     self.predict_velocity()
-                    
-                    
 
         
     def odom_callback(self, msg):
@@ -165,7 +171,8 @@ class VelocityPredictorNode(Node):
         """Predict velocity using the model"""
         # Ensure we have all necessary data: laser, odom, and goal
     
-        if self.image is None or self.goal_data is None:
+        if self.image is None or self.laser_data is None or self.goal_data is None:
+            
             return
         if self.translation is not None:
             # Compute goal position relative to robot
@@ -178,60 +185,53 @@ class VelocityPredictorNode(Node):
             return
         print('goal ', self.goal_data_rel)
         image_input = np.expand_dims(self.image, axis=0)  # Add batch dimension
+        laser_input = np.expand_dims(self.laser_data, axis=0)  # Add batch dimension
         goal_input = np.expand_dims(self.goal_data_rel, axis=0)    # Add batch dimension
 
         # Pass the inputs to the model
-        predicted_velocity = self.model.predict([image_input, goal_input])[0]
+        predicted_velocity = self.model.predict([image_input, laser_input, goal_input])[0]
         
                 
         print('predicted_velocity ', predicted_velocity)
         # Prepare and publish Twist message
         twist_msg = Twist()
-        twist_msg.linear.x = float(predicted_velocity[0])  # Predicted linear velocity
-        twist_msg.linear.y = float(predicted_velocity[1])  # Predicted linear velocity
+        twist_msg.linear.x = float(predicted_velocity[0]) # Predicted linear velocity
+        twist_msg.linear.y = float(predicted_velocity[1])# Predicted linear velocity
         twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
+        theta = math.atan2(predicted_velocity[1], predicted_velocity[0])
+    
+        # Update the direction based on angular velocity
+        theta_new = theta + predicted_velocity[2] 
+    
+        # Normalize theta_new to the range [-pi, pi]
+        theta_new = math.atan2(math.sin(theta_new), math.cos(theta_new))
+        print('angle of movement', theta_new)
         
         self.cmd_vel_pub.publish(twist_msg)
         self.record_path()
         self.path_pub.publish(self.path_msg)
-        time.sleep(0.5)
-        
+        time.sleep(0.3)
+
     def record_path(self):
         """Record the robot's position and orientation in the path message"""
         if self.robot_position and self.robot_orientation:
             pose_stamped = PoseStamped()
-            pose_stamped.header.frame_id = "odom"
+            pose_stamped.header = Header()
             pose_stamped.header.stamp = self.get_clock().now().to_msg()
             pose_stamped.pose.position.x = self.robot_position[0]
             pose_stamped.pose.position.y = self.robot_position[1]
             pose_stamped.pose.position.z = 0.0  # Assuming a 2D path
             pose_stamped.pose.orientation = self.robot_orientation
-            pose_stamped.pose = self.transform_pose_to_map(pose_stamped.pose)
             self.path_msg.poses.append(pose_stamped)
 
             # Optionally, limit the path size to avoid excessive memory usage
-            max_path_length = 10000
+            max_path_length = 1000
             if len(self.path_msg.poses) > max_path_length:
                 self.path_msg.poses.pop(0)
                 
-    def transform_pose_to_map(self, odom_pose):
-        try:
-            # Lookup the transform from map to odom
-            transform = self.tf_buffer.lookup_transform(
-                'map',  # Target frame
-                'odom',  # Source frame
-                rclpy.time.Time(),  # Use the latest transform
-                timeout=rclpy.duration.Duration(seconds=1.0)
-            )
-    
-            # Transform the odom pose into the map frame
-            map_pose = tf2_geometry_msgs.do_transform_pose(odom_pose, transform)
-            return map_pose
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().error(f"Failed to transform pose: {e}")
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode(model_path= 'models/model_img_corr07112024_a_model_epoch_200.keras')
+    node = VelocityPredictorNode(model_path= 'models/model_img_laser_corr07112024_a_model_epoch_200.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

@@ -13,6 +13,9 @@ import transforms3d
 import os
 import time
 import math
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
+import tf2_geometry_msgs
+
 
 # Function to invert a transformation (translation + rotation)
 def invert_transform(translation, rotation):
@@ -107,7 +110,9 @@ class VelocityPredictorNode(Node):
         self.goal_data_rel = None
         self.path = []  # Store robot's path
         self.path_msg = Path()  # Path message to be published
-        self.path_msg.header.frame_id = 'odom'  # Assuming the path is in the "map" frame
+        self.path_msg.header.frame_id = 'map'  # Assuming the path is in the "map" frame
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
     
     def laser_callback(self, msg):
@@ -175,7 +180,6 @@ class VelocityPredictorNode(Node):
 
         # Pass the inputs to the model
         predicted_velocity = self.model.predict([laser_input, goal_input])[0]
-        
                 
         print('predicted_velocity ', predicted_velocity)
         # Prepare and publish Twist message
@@ -195,7 +199,7 @@ class VelocityPredictorNode(Node):
         self.cmd_vel_pub.publish(twist_msg)
         self.record_path()
         self.path_pub.publish(self.path_msg)
-        time.sleep(0.3)
+        time.sleep(0.7)
 
     def record_path(self):
         """Record the robot's position and orientation in the path message"""
@@ -207,16 +211,33 @@ class VelocityPredictorNode(Node):
             pose_stamped.pose.position.y = self.robot_position[1]
             pose_stamped.pose.position.z = 0.0  # Assuming a 2D path
             pose_stamped.pose.orientation = self.robot_orientation
+            pose_stamped.pose = self.transform_pose_to_map(pose_stamped.pose)
             self.path_msg.poses.append(pose_stamped)
 
             # Optionally, limit the path size to avoid excessive memory usage
-            max_path_length = 1000
+            max_path_length = 10000
             if len(self.path_msg.poses) > max_path_length:
                 self.path_msg.poses.pop(0)
+
+    def transform_pose_to_map(self, odom_pose):
+        try:
+            # Lookup the transform from map to odom
+            transform = self.tf_buffer.lookup_transform(
+                'map',  # Target frame
+                'odom',  # Source frame
+                rclpy.time.Time(),  # Use the latest transform
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+    
+            # Transform the odom pose into the map frame
+            map_pose = tf2_geometry_msgs.do_transform_pose(odom_pose, transform)
+            return map_pose
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().error(f"Failed to transform pose: {e}")
                 
 def main(args=None):
     rclpy.init(args=args)
-    node = VelocityPredictorNode(model_path= 'models/model_laser_corr07112024_rescaled_outputs_a_model_epoch_200.keras')
+    node = VelocityPredictorNode(model_path= 'models/model_laser_corr07112024_a_model_epoch_200.keras')
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
