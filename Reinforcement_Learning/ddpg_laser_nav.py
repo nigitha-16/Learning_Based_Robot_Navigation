@@ -93,7 +93,7 @@ class ReplayBuffer:
 
 # DDPG Agent
 class DDPGAgent:
-    def __init__(self, laser_dim, goal_dim, action_dim, pretrained_model_path, buffer_size=1000, batch_size=64, gamma=0.6, tau=0.05, lr=1e-2):
+    def __init__(self, laser_dim, goal_dim, action_dim, pretrained_model_path, buffer_size=1000, batch_size=64, gamma=0.8, tau=0.005, lr=1e-3):
         self.actor = Actor(pretrained_model_path)
         self.critic = Critic(laser_dim, goal_dim, action_dim)
         self.target_actor = Actor(pretrained_model_path)
@@ -178,9 +178,7 @@ class DDPGAgent:
         actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
 
-        # Soft update target networks
-        self.soft_update(self.actor, self.target_actor)
-        self.soft_update(self.critic, self.target_critic)
+        
 
         return actor_loss.numpy(), critic_loss.numpy()
 
@@ -221,6 +219,11 @@ def train_ddpg(env, agent, num_episodes=20, max_timesteps=100):
 
             # Update agent and log losses
             actor_loss, critic_loss = agent.update()
+            
+            if t%10==0:
+                # Soft update target networks
+                agent.soft_update(agent.actor, agent.target_actor)
+                agent.soft_update(agent.critic, agent.target_critic)
 
             state = next_state
             episode_reward += reward

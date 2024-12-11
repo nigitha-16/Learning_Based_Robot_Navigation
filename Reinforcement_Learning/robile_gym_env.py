@@ -243,10 +243,12 @@ class RobileEnv(gym.Env):
             
 
         # Compute reward
-        reward = self.compute_reward(observation)
+        reward = self.compute_reward(observation, action)
 
         # Check if the episode is done
         done = self.check_done(observation)
+        
+        self.prev_goal_dist = observation[1][0]
 
         # Additional debug info
         info = {}
@@ -274,6 +276,7 @@ class RobileEnv(gym.Env):
         if self.node.laser_data is None or self.node.goal_data is None:
             
             return [self.empty_laser, self.empty_goal]
+        smoothed_laser = np.convolve(self.node.laser_data, np.ones(3)/3, mode='same')
         if self.node.translation is not None:
             # Compute goal position relative to robot
             goal_position = transform_pose(self.node.translation_odom_map, self.node.rotation_odom_map, self.node.goal_data)
@@ -283,17 +286,26 @@ class RobileEnv(gym.Env):
             self.node.goal_data_rel = np.array([goal_distance, goal_angle])
         else:
             return [self.empty_laser, self.empty_goal]
-        return [self.node.laser_data, self.node.goal_data_rel]
+        return [smoothed_laser, self.node.goal_data_rel]
 
-    def compute_reward(self, observation):
+    def compute_reward(self, observation, action):
         """
         Define a reward function based on the robot's state.
         """
         # minimize distance to the goal
-        reward = -self.node.goal_data_rel[0]
-        smoothed_laser = np.convolve(self.node.laser_data, np.ones(3)/3, mode='same')
-        if np.any(smoothed_laser < 0.3): 
-            reward = -100
+        reward = 1
+        if self.prev_goal_dist is not None:
+            if observation[1][0] > self.prev_goal_dist:
+                reward -= 10
+            else:
+                reward += 10
+        if np.any(observation[0] < 0.3): 
+            reward -= 100
+        if np.any(action < self.action_space.low) or np.any(action > self.action_space.high):
+            # Penalty for actions outside the defined action space
+            reward -= 10 
+        if observation[1][0] < 0.3:  # Goal reached
+            reward+=100
         return reward
 
     def check_done(self, observation):
@@ -301,11 +313,11 @@ class RobileEnv(gym.Env):
         Check if the episode is done.
         """
         # Example: Done if goal is reached or robot collides
-        if self.node.goal_data_rel[0] < 0.3:  # Goal reached
-            print(self.node.goal_data_rel[0], 'goal reach')
+        if observation[1][0] < 0.3:  # Goal reached
+            print(observation[1][0], 'goal reach')
             return True
-        smoothed_laser = np.convolve(self.node.laser_data, np.ones(5)/5, mode='same')
-        if np.any(smoothed_laser < 0.3):  # Collision threshold    
+        
+        if np.any(observation[0] < 0.3):  # Collision threshold    
             print('collision')
             return True
         return False
