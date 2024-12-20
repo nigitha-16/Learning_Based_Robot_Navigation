@@ -218,20 +218,27 @@ class RobileEnv(gym.Env):
 
         # Define action space (linear_x, linear_y, angular_z)
         self.action_space = spaces.Box(
-            low=np.array([-0.0001, -0.05, -0.05]),  # Define action limits
-            high=np.array([0.05, 0.05, 0.05]),
+            low=np.array([-0.0001, -0.001, -0.05]),  # action limits
+            high=np.array([0.05, 0.001, 0.05]),
             dtype=np.float32
         )
         
         self.empty_laser = np.full(self.laser_space.shape, np.nan, dtype=np.float32)
         self.empty_goal = np.full(self.goal_space.shape, np.nan, dtype=np.float32)
+        self.prev_goal_dist = None
+        self.collision_value_threshold = 0.4 # m
+        self.collision_num_threshold = 5 # laser points count
+        self.goal_reach_threshold = 0.3 # m
 
     def step(self, action):
         """
         Perform an action, collect the next state, reward, and done flag.
         """
         # Send action to the robot
-        linear_x, linear_y, angular_z = action
+        action_low = tf.constant(self.action_space.low, dtype=tf.float32)
+        action_high = tf.constant(self.action_space.high, dtype=tf.float32)
+        action_clipped = tf.clip_by_value(action, action_low, action_high)
+        linear_x, linear_y, angular_z = action_clipped
         self.node.send_command_to_robot(linear_x, linear_y, angular_z)
         # Wait for new data
         self.node.laser_data = None
@@ -276,7 +283,7 @@ class RobileEnv(gym.Env):
         if self.node.laser_data is None or self.node.goal_data is None:
             
             return [self.empty_laser, self.empty_goal]
-        smoothed_laser = np.convolve(self.node.laser_data, np.ones(3)/3, mode='same')
+        # smoothed_laser = np.convolve(self.node.laser_data, np.ones(5)/5, mode='same')
         if self.node.translation is not None:
             # Compute goal position relative to robot
             goal_position = transform_pose(self.node.translation_odom_map, self.node.rotation_odom_map, self.node.goal_data)
@@ -286,38 +293,41 @@ class RobileEnv(gym.Env):
             self.node.goal_data_rel = np.array([goal_distance, goal_angle])
         else:
             return [self.empty_laser, self.empty_goal]
-        return [smoothed_laser, self.node.goal_data_rel]
+        return [self.node.laser_data, self.node.goal_data_rel]
 
     def compute_reward(self, observation, action):
         """
         Define a reward function based on the robot's state.
         """
         # minimize distance to the goal
-        reward = 1
+        reward = - observation[1][0]
         if self.prev_goal_dist is not None:
             if observation[1][0] > self.prev_goal_dist:
                 reward -= 10
             else:
                 reward += 10
-        if np.any(observation[0] < 0.3): 
+        condition = (observation[0] < self.collision_value_threshold) & (observation[0] > 0.05)
+        streak = np.convolve(condition, np.ones(self.collision_num_threshold), mode = 'valid')
+        if np.any(streak==self.collision_num_threshold)   :
             reward -= 100
         if np.any(action < self.action_space.low) or np.any(action > self.action_space.high):
             # Penalty for actions outside the defined action space
-            reward -= 10 
-        if observation[1][0] < 0.3:  # Goal reached
-            reward+=100
+            reward -= 50 
+        if observation[1][0] < self.goal_reach_threshold:  # Goal reached
+            reward+=80
         return reward
 
     def check_done(self, observation):
         """
         Check if the episode is done.
         """
-        # Example: Done if goal is reached or robot collides
-        if observation[1][0] < 0.3:  # Goal reached
+        if observation[1][0] < self.goal_reach_threshold:  # Goal reached
             print(observation[1][0], 'goal reach')
             return True
-        
-        if np.any(observation[0] < 0.3):  # Collision threshold    
+        condition = (observation[0] < self.collision_value_threshold) & (observation[0] > 0.05)
+        streak = np.convolve(condition, np.ones(self.collision_num_threshold), mode = 'valid')
+        if np.any(streak==self.collision_num_threshold):    
+            print(self.node.laser_data)
             print('collision')
             return True
         return False

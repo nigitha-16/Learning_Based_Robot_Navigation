@@ -1,0 +1,13 @@
+Exp1:
+
+num_episodes=100, max_timesteps=300
+buffer_size=10000, batch_size=128, gamma=0.9, tau=0.005, lr=1e-3
+epsilon_initial = 0.3   # Starting value for epsilon
+epsilon_final = 0.01     # Minimum value for epsilon
+epsilon_decay = 0.995 
+Soft update target networks -- each 100 global steps
+low=np.array([-0.0001, -0.001, -0.03]),  # action limits
+            high=np.array([0.03, 0.001, 0.03]),
+no weighted rewards
+no seperate training
+actor training starts from 5000 global steps

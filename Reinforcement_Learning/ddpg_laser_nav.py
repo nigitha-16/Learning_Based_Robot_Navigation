@@ -93,7 +93,7 @@ class ReplayBuffer:
 
 # DDPG Agent
 class DDPGAgent:
-    def __init__(self, laser_dim, goal_dim, action_dim, pretrained_model_path, buffer_size=1000, batch_size=64, gamma=0.8, tau=0.005, lr=1e-3):
+    def __init__(self, laser_dim, goal_dim, action_dim, pretrained_model_path, buffer_size=10000, batch_size=128, gamma=0.9, tau=0.005, lr=1e-3):
         self.actor = Actor(pretrained_model_path)
         self.critic = Critic(laser_dim, goal_dim, action_dim)
         self.target_actor = Actor(pretrained_model_path)
@@ -137,8 +137,43 @@ class DDPGAgent:
     def save_checkpoints(self):
         self.actor_checkpoint_manager.save()
         self.critic_checkpoint_manager.save()
+
+    def train_critic_with_full_buffer(self, epochs=50):
+        """Train the critic with the entire replay buffer for multiple epochs."""
+        if self.buffer.size() < self.buffer.batch_size:
+            print("Not enough data in the buffer to train the critic.")
+            return
+        
+        for epoch in range(epochs):
+            for batch in range(0, self.buffer.size(), self.buffer.batch_size):
+                # Sample a batch from the replay buffer
+                batch_data = list(self.buffer.buffer)[batch:batch + self.buffer.batch_size]
+                state_laser, state_goal, action, reward, next_state_laser, next_state_goal, done = zip(*batch_data)
+                
+                # Prepare data
+                state = [np.array(state_laser), np.array(state_goal)]
+                action = np.array(action)
+                reward = np.array(reward)
+                next_state = [np.array(next_state_laser), np.array(next_state_goal)]
+                done = np.array(done)
+
+                # Compute target Q-values
+                target_action = self.target_actor(next_state[0], next_state[1])
+                target_q_value = self.target_critic(next_state[0], next_state[1], target_action)
+                target = reward + (1 - done) * self.gamma * target_q_value
+
+                # Train critic
+                with tf.GradientTape() as tape:
+                    current_q_value = self.critic(state[0], state[1], action)
+                    critic_loss = tf.reduce_mean(tf.square(current_q_value - target))
+
+                critic_grads = tape.gradient(critic_loss, self.critic.trainable_variables)
+                self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
             
-    def update(self):
+            print(f"Epoch {epoch + 1} completed. Critic loss: {critic_loss.numpy()}")
+
+            
+    def update(self, global_timestep):
         if self.buffer.size() < self.buffer.batch_size:
             return None, None
 
@@ -152,6 +187,7 @@ class DDPGAgent:
         
         target_action = self.target_actor(next_state[0], next_state[1])
         target_q_value = self.target_critic(next_state[0], next_state[1], target_action)
+        reward_weights = tf.where(reward>0, 2.0, 1.0)
         target = reward + (1 - done) * self.gamma * target_q_value
         # print('target', target)
         
@@ -159,6 +195,7 @@ class DDPGAgent:
         # Update Critic
         with tf.GradientTape() as tape:        
             current_q_value = self.critic(state[0], state[1], action)
+            # critic_loss = tf.reduce_mean(reward_weights * tf.square(current_q_value - target))
             critic_loss = tf.reduce_mean(tf.square(current_q_value - target))
 
         critic_grads = tape.gradient(critic_loss, self.critic.trainable_variables)
@@ -169,18 +206,17 @@ class DDPGAgent:
         # print("critic_grads:", critic_grads)
         
         self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
-
-        # Update Actor
-        with tf.GradientTape() as tape:
-            action_pred = self.actor(state[0], state[1])
-            actor_loss = -tf.reduce_mean(self.critic(state[0], state[1], action_pred))
-
-        actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
-        self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
-
-        
-
-        return actor_loss.numpy(), critic_loss.numpy()
+        if global_timestep>5000:
+            # Update Actor
+            with tf.GradientTape() as tape:
+                action_pred = self.actor(state[0], state[1])
+                actor_loss = -tf.reduce_mean(self.critic(state[0], state[1], action_pred))
+    
+            actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
+            self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
+            return actor_loss.numpy(), critic_loss.numpy()
+        else:
+            return None, critic_loss.numpy()
 
     def soft_update(self, source, target):
         source_weights = source.get_weights()
@@ -195,20 +231,26 @@ class DDPGAgent:
         
 
 # Training Loop
-def train_ddpg(env, agent, num_episodes=20, max_timesteps=100):
+def train_ddpg(env, agent, num_episodes=100, max_timesteps=300):
     writer = tf_summary.create_file_writer(log_dir)
-    action_low = tf.constant(env.action_space.low, dtype=tf.float32)
-    action_high = tf.constant(env.action_space.high, dtype=tf.float32)
-
+    global_timestep = 0
+    epsilon_initial = 0.3   # Starting value for epsilon
+    epsilon_final = 0.01     # Minimum value for epsilon
+    epsilon_decay = 0.995 
     for episode in range(num_episodes):
         state = env.reset()
         episode_reward = 0
         start_time = time.time()
-
+        epsilon = max(epsilon_final, epsilon_initial * (epsilon_decay ** episode))
+        if agent.buffer.size()>500 and global_timestep<5000:
+            print(f"Training critic on full replay buffer after episode {episode}")
+            agent.train_critic_with_full_buffer(epochs=20)
         for t in range(max_timesteps):
-            state_vector = np.expand_dims(state[0], axis=0), np.expand_dims(state[1], axis=0)
-            action = agent.actor(state_vector[0], state_vector[1])[0]
-            action = tf.clip_by_value(action, action_low, action_high)
+            if np.random.rand() < epsilon:
+                action = env.action_space.sample()
+            else:
+                state_vector = np.expand_dims(state[0], axis=0), np.expand_dims(state[1], axis=0)
+                action = agent.actor(state_vector[0], state_vector[1])[0]
             next_state, reward, done, _ = env.step(action)
             print('timestep', t)
             print('action', action)
@@ -216,28 +258,30 @@ def train_ddpg(env, agent, num_episodes=20, max_timesteps=100):
 
             # Store transition in the replay buffer
             agent.buffer.add(state, action, reward, next_state, done)
-
+    
             # Update agent and log losses
-            actor_loss, critic_loss = agent.update()
+            actor_loss, critic_loss = agent.update(global_timestep)
             
-            if t%10==0:
+            if global_timestep%30==0:
                 # Soft update target networks
                 agent.soft_update(agent.actor, agent.target_actor)
                 agent.soft_update(agent.critic, agent.target_critic)
 
             state = next_state
             episode_reward += reward
-
-            if episode%5==0:
+            global_timestep +=1
             
-                with writer.as_default():
-                    tf_summary.scalar(f"Episode_{episode} Reward", reward, step=t)
-                    if actor_loss is not None:
-                        tf_summary.scalar(f"Episode_{episode} Actor Loss", actor_loss, step=t)
-                        tf_summary.scalar(f"Episode_{episode} Critic Loss", critic_loss, step=t)
+            
+            with writer.as_default():
+                tf_summary.scalar(f"Episode_{episode} Reward", reward, step=t)
+                if actor_loss is not None:
+                    tf_summary.scalar(f"Episode_{episode} Actor Loss", actor_loss, step=t)
+                if critic_loss is not None:
+                    tf_summary.scalar(f"Episode_{episode} Critic Loss", critic_loss, step=t)
 
             if done:
                 break
+        
 
         if episode%5==0:
             # Save checkpoints after each episode
@@ -246,8 +290,10 @@ def train_ddpg(env, agent, num_episodes=20, max_timesteps=100):
         # Log metrics
         with writer.as_default():
             tf_summary.scalar("Episode Reward", episode_reward, step=episode)
-            tf_summary.scalar("Actor Loss", actor_loss, step=episode)
-            tf_summary.scalar("Critic Loss", critic_loss, step=episode)
+            if actor_loss is not None:
+                tf_summary.scalar("Actor Loss", actor_loss, step=episode)
+            if critic_loss is not None:
+                tf_summary.scalar("Critic Loss", critic_loss, step=episode)
             tf_summary.scalar("Episode Length", t + 1, step=episode)
             tf_summary.scalar("Time per Episode", time.time() - start_time, step=episode)
 
