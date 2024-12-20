@@ -13,7 +13,7 @@ import transforms3d
 from tensorflow.keras.models import Model
 import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D, Dropout
 from tensorflow.keras.initializers import HeNormal
 from tensorflow.keras import Model, Input, regularizers
 from tensorflow.keras.applications import MobileNetV2
@@ -212,29 +212,41 @@ class MotionCommandModel:
         intermediate_layer = base_model.get_layer('block_13_expand_relu').output
     
         # Add custom convolutional layers on top of the intermediate output
-        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(intermediate_layer)
+        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+                   padding='same')(intermediate_layer)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+        x = Dropout(0.2)(x)
         
-        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+                   padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+        x = Dropout(0.2)(x)
         
-        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', 
+                   padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+
     
         # Global Average Pooling to reduce spatial dimensions
         image_hidden = GlobalAveragePooling2D()(x)
     
         # Process the pooled features with dense layers
         image_hidden = Dense(128, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = Dropout(0.2)(image_hidden)
         image_hidden = BatchNormalization()(image_hidden)
         image_hidden = LeakyReLU()(image_hidden)
-        image_hidden = Dense(16, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = Dropout(0.2)(image_hidden)
+        image_hidden = Dense(64, kernel_initializer='he_normal')(image_hidden)
         image_hidden = BatchNormalization()(image_hidden)
         image_hidden = LeakyReLU()(image_hidden)
-
+        image_hidden = Dropout(0.2)(image_hidden)
+        image_hidden = Dense(32, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = BatchNormalization()(image_hidden)
+        image_hidden = LeakyReLU()(image_hidden)
+        
         # Concatenate processed features
         concatenated = concatenate([goal_hidden, laser_hidden, image_hidden])
         hidden = Dense(128, kernel_initializer=HeNormal())(concatenated)

@@ -193,16 +193,16 @@ class MotionCommandModel:
         base_model.trainable = False
         
         # Choose an intermediate layer from MobileNetV2
-        intermediate_layer = base_model.get_layer('block_15_expand_relu').output
+        intermediate_layer = base_model.get_layer('block_13_expand_relu').output
     
         # Add custom convolutional layers on top of the intermediate output
-        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', 
+        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
                    padding='same')(intermediate_layer)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
         x = Dropout(0.2)(x)
         
-        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', 
+        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
                    padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
