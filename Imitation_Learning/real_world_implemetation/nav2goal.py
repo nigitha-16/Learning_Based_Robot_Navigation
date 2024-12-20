@@ -179,7 +179,7 @@ class VelocityPredictorNode(Node):
         goal_input = np.expand_dims(self.goal_data_rel, axis=0)    # Add batch dimension
 
         # Pass the inputs to the model
-        predicted_velocity = self.model.predict([laser_input, goal_input])[0]
+        predicted_velocity = self.model.predict([laser_input, goal_input])[0]*2
                 
         print('predicted_velocity ', predicted_velocity)
         # Prepare and publish Twist message

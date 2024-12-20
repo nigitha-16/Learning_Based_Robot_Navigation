@@ -1,24 +1,22 @@
-import gymnasium as gym
-from gymnasium import spaces
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist, PoseStamped
+from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped
-from nav_msgs.msg import Path
 from tf2_msgs.msg import TFMessage
-from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
-import tf2_geometry_msgs
+from nav_msgs.msg import Path
 from std_msgs.msg import Header
+import numpy as np
 import tensorflow as tf
 import math
 import transforms3d
 import os
 import time
-import math
-import time
+from cv_bridge import CvBridge
+import cv2
+from PIL import Image as pil_image
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
+import tf2_geometry_msgs
 
 
 # Function to invert a transformation (translation + rotation)
@@ -66,21 +64,19 @@ def transform_pose(translation, rotation, point_in_odom):
     
     return point_transformed
 
-class RobileNode(Node):
-    def __init__(self):
-        super().__init__("RobileNode")
-
-        # ROS2 Subscribers
-        self.laser_sub = self.create_subscription(
-            LaserScan,
-            '/scan',
-            self.laser_callback,
+class VelocityPredictorNode(Node):
+    def __init__(self, model_path):
+        super().__init__('velocity_predictor')
+        print(os.getcwd())
+        # Load the trained TensorFlow model
+        self.model = tf.keras.models.load_model(model_path, compile=False)
+        print('loaded model')
+        # Subscribe to laser scan, odometry, and goal position data
+        self.img_sub = self.create_subscription(
+            Image,
+            '/camera/camera/color/image_raw',
+            self.img_callback,
             1)
-        self.goal_sub = self.create_subscription(
-            PoseStamped,
-            '/goal_pose',
-            self.goal_callback,
-            10)
         
         self.odom_sub = self.create_subscription(
             Odometry,
@@ -92,14 +88,20 @@ class RobileNode(Node):
             TFMessage,
             '/tf',
             self.tf_callback,
-            1)
-
-        # Publisher for the velocity
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+            10)
+        
+        self.goal_sub = self.create_subscription(
+            PoseStamped,
+            '/goal_pose',
+            self.goal_callback,
+            10)
         # Publisher for the path
         self.path_pub = self.create_publisher(Path, '/robot_path', 10)
+        # Publisher for the velocity
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        self.laser_data = None
+        # Data storage
+        self.image = None
         self.robot_position = None
         self.robot_orientation = None
         self.goal_data = None  
@@ -108,18 +110,18 @@ class RobileNode(Node):
         self.translation_odom_map = None
         self.rotation_odom_map =None
         self.goal_data_rel = None
+        self.bridge = CvBridge()
         self.path = []  # Store robot's path
         self.path_msg = Path()  # Path message to be published
         self.path_msg.header.frame_id = 'map'  # Assuming the path is in the "map" frame
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-    def laser_callback(self, msg):
-        """Callback for laser scan data"""
-        # Convert laser scan to numpy array
-        ranges = np.array(msg.ranges, dtype=np.float32)
-        ranges = np.nan_to_num(ranges, nan=100.0, posinf=100.0, neginf=100.0)
-        self.laser_data = ranges
+    
+    def img_callback(self, msg):
+        cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        self.image = np.array(pil_image.fromarray(cv_image).resize((224, 224)))
+        
         
         
     def tf_callback(self, msg):
@@ -140,6 +142,10 @@ class RobileNode(Node):
                     rotation = transform.transform.rotation
                     self.rotation = [rotation.x, rotation.y, rotation.z, rotation.w]
 
+                    self.predict_velocity()
+                    
+                    
+
         
     def odom_callback(self, msg):
         """Callback for odometry data"""
@@ -152,19 +158,43 @@ class RobileNode(Node):
     def goal_callback(self, msg):
         """Callback for goal position in odom frame (PoseStamped)"""
         self.goal_data = [msg.pose.position.x, msg.pose.position.y]
-        print('goal_data', self.goal_data)
+        
 
-    def send_command_to_robot(self, linear_x, linear_y, angular_z):
-        """
-        Publish velocity commands to the robot.
-        """
+    
+    def predict_velocity(self):
+        """Predict velocity using the model"""
+        # Ensure we have all necessary data: laser, odom, and goal
+    
+        if self.image is None or self.goal_data is None:
+            return
+        if self.translation is not None:
+            # Compute goal position relative to robot
+            goal_position = transform_pose(self.translation_odom_map, self.rotation_odom_map, self.goal_data)
+            goal_position = transform_pose(self.translation, self.rotation, goal_position)
+            goal_distance = np.sqrt(goal_position[0] ** 2 + goal_position[1]** 2)
+            goal_angle = math.atan2(goal_position[1],goal_position[0])
+            self.goal_data_rel = [goal_distance, goal_angle]
+        else:
+            return
+        print('goal ', self.goal_data_rel)
+        image_input = np.expand_dims(self.image, axis=0)  # Add batch dimension
+        goal_input = np.expand_dims(self.goal_data_rel, axis=0)    # Add batch dimension
+
+        # Pass the inputs to the model
+        predicted_velocity = self.model.predict([image_input, goal_input])[0]*1.5
+        
+                
+        print('predicted_velocity ', predicted_velocity)
+        # Prepare and publish Twist message
         twist_msg = Twist()
-        twist_msg.linear.x = float(linear_x) # Predicted linear velocity
-        twist_msg.linear.y = float(linear_y)# Predicted linear velocity
-        twist_msg.angular.z = float(angular_z)  # Predicted angular velocity        
+        twist_msg.linear.x = float(predicted_velocity[0])  # Predicted linear velocity
+        twist_msg.linear.y = float(predicted_velocity[1])  # Predicted linear velocity
+        twist_msg.angular.z = float(predicted_velocity[2])  # Predicted angular velocity
+        
         self.cmd_vel_pub.publish(twist_msg)
-        # self.record_path()
-        # self.path_pub.publish(self.path_msg)
+        self.record_path()
+        self.path_pub.publish(self.path_msg)
+        time.sleep(0.3)
         
     def record_path(self):
         """Record the robot's position and orientation in the path message"""
@@ -199,133 +229,13 @@ class RobileNode(Node):
             return map_pose
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().error(f"Failed to transform pose: {e}")
-
-
-class RobileEnv(gym.Env):
-    def __init__(self):
-        super(RobileEnv, self).__init__()
-        
-        # Initialize ROS2
-        rclpy.init()
-        self.node = RobileNode()
-
-        # Define observation space 
-        laser_dim = 513
-        goal_dim = 2
-        self.laser_space = spaces.Box(low=-np.inf, high=np.inf, shape=(laser_dim,), dtype=np.float32)
-        self.goal_space = spaces.Box(low=-np.inf, high=np.inf, shape=(goal_dim,), dtype=np.float32)
-
-
-        # Define action space (linear_x, linear_y, angular_z)
-        self.action_space = spaces.Box(
-            low=np.array([-0.0001, -0.05, -0.05]),  # Define action limits
-            high=np.array([0.05, 0.05, 0.05]),
-            dtype=np.float32
-        )
-        
-        self.empty_laser = np.full(self.laser_space.shape, np.nan, dtype=np.float32)
-        self.empty_goal = np.full(self.goal_space.shape, np.nan, dtype=np.float32)
-
-    def step(self, action):
-        """
-        Perform an action, collect the next state, reward, and done flag.
-        """
-        # Send action to the robot
-        linear_x, linear_y, angular_z = action
-        self.node.send_command_to_robot(linear_x, linear_y, angular_z)
-        # Wait for new data
-        self.node.laser_data = None
-        self.node.translation = None
-        observation = [self.empty_laser, self.empty_goal]
-        while np.any(np.isnan(observation[0])) or np.any(np.isnan(observation[1])):
-            rclpy.spin_once(self.node, timeout_sec=1)
-            observation = self.get_robot_state()
             
+def main(args=None):
+    rclpy.init(args=args)
+    node = VelocityPredictorNode(model_path= 'models/model_img_corr07112024_aug_a_model_epoch_500.keras')
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
-        # Compute reward
-        reward = self.compute_reward(observation, action)
-
-        # Check if the episode is done
-        done = self.check_done(observation)
-        
-        self.prev_goal_dist = observation[1][0]
-
-        # Additional debug info
-        info = {}
-        return observation, reward, done, info
-
-    def reset(self):
-        """
-        Give new goal to robot.
-        """
-        print('Give Goal Data')
-        self.node.send_command_to_robot(0.0, 0.0, 0.0)
-        self.node.goal_data = None
-        observation = [self.empty_laser, self.empty_goal]
-        
-        while np.any(np.isnan(observation[0])) or np.any(np.isnan(observation[1])):           
-            rclpy.spin_once(self.node, timeout_sec=1)
-            observation = self.get_robot_state()
-        print('received Goal')
-        return observation
-
-    def get_robot_state(self):
-        """
-        Get the combined state of the robot (laser + goal).
-        """
-        if self.node.laser_data is None or self.node.goal_data is None:
-            
-            return [self.empty_laser, self.empty_goal]
-        smoothed_laser = np.convolve(self.node.laser_data, np.ones(3)/3, mode='same')
-        if self.node.translation is not None:
-            # Compute goal position relative to robot
-            goal_position = transform_pose(self.node.translation_odom_map, self.node.rotation_odom_map, self.node.goal_data)
-            goal_position = transform_pose(self.node.translation, self.node.rotation, goal_position)
-            goal_distance = np.sqrt(goal_position[0] ** 2 + goal_position[1]** 2)
-            goal_angle = math.atan2(goal_position[1],goal_position[0])
-            self.node.goal_data_rel = np.array([goal_distance, goal_angle])
-        else:
-            return [self.empty_laser, self.empty_goal]
-        return [smoothed_laser, self.node.goal_data_rel]
-
-    def compute_reward(self, observation, action):
-        """
-        Define a reward function based on the robot's state.
-        """
-        # minimize distance to the goal
-        reward = 1
-        if self.prev_goal_dist is not None:
-            if observation[1][0] > self.prev_goal_dist:
-                reward -= 10
-            else:
-                reward += 10
-        if np.any(observation[0] < 0.3): 
-            reward -= 100
-        if np.any(action < self.action_space.low) or np.any(action > self.action_space.high):
-            # Penalty for actions outside the defined action space
-            reward -= 10 
-        if observation[1][0] < 0.3:  # Goal reached
-            reward+=100
-        return reward
-
-    def check_done(self, observation):
-        """
-        Check if the episode is done.
-        """
-        # Example: Done if goal is reached or robot collides
-        if observation[1][0] < 0.3:  # Goal reached
-            print(observation[1][0], 'goal reach')
-            return True
-        
-        if np.any(observation[0] < 0.3):  # Collision threshold    
-            print('collision')
-            return True
-        return False
-
-
-    def close(self):
-        """
-        Clean up ROS2 resources.
-        """
-        self.node.destroy_node()
-        rclpy.shutdown()
+if __name__ == '__main__':
+    main()
