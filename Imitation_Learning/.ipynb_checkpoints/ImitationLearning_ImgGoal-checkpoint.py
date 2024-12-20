@@ -13,7 +13,7 @@ import transforms3d
 from tensorflow.keras.models import Model
 import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, LeakyReLU, Add, Flatten, Dense, concatenate, Rescaling, Normalization, Conv2D, MaxPooling2D, Dropout
 from tensorflow.keras.initializers import HeNormal
 from tensorflow.keras import Model, Input, regularizers
 from tensorflow.keras.applications import MobileNetV2
@@ -86,6 +86,7 @@ class DatasetLoader:
 
     def get_prepared_datasets(self, train_size=0.7, val_size=0.2, batch_size=128):
         dataset = self.load_dataset()
+        
         train_dataset, val_dataset, test_dataset = self.split_dataset(dataset, train_size, val_size)
         del dataset
         train_dataset = self.preprocess_and_augment(train_dataset, batch_size)
@@ -183,6 +184,9 @@ class MotionCommandModel:
         goal_hidden = BatchNormalization()(goal_hidden)
         goal_hidden = LeakyReLU()(goal_hidden)
         goal_hidden = self.residual_block(goal_hidden, 16)
+        goal_hidden = Dense(16, kernel_initializer=HeNormal())(goal_hidden)  # Original third layer
+        goal_hidden = BatchNormalization()(goal_hidden)
+        goal_hidden = LeakyReLU()(goal_hidden)
 
         # Load and freeze base model
         base_model = MobileNetV2(include_top=False, weights='imagenet', input_tensor=image_rescaled)
@@ -192,26 +196,38 @@ class MotionCommandModel:
         intermediate_layer = base_model.get_layer('block_13_expand_relu').output
     
         # Add custom convolutional layers on top of the intermediate output
-        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(intermediate_layer)
+        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+                   padding='same')(intermediate_layer)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+        x = Dropout(0.2)(x)
         
-        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+                   padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+        x = Dropout(0.2)(x)
         
-        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
+        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', 
+                   padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
+
     
         # Global Average Pooling to reduce spatial dimensions
         image_hidden = GlobalAveragePooling2D()(x)
     
         # Process the pooled features with dense layers
         image_hidden = Dense(128, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = Dropout(0.2)(image_hidden)
         image_hidden = BatchNormalization()(image_hidden)
         image_hidden = LeakyReLU()(image_hidden)
-        image_hidden = Dense(16, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = Dropout(0.2)(image_hidden)
+        image_hidden = Dense(64, kernel_initializer='he_normal')(image_hidden)
+        image_hidden = BatchNormalization()(image_hidden)
+        image_hidden = LeakyReLU()(image_hidden)
+        image_hidden = Dropout(0.2)(image_hidden)
+        image_hidden = Dense(32, kernel_initializer='he_normal')(image_hidden)
         image_hidden = BatchNormalization()(image_hidden)
         image_hidden = LeakyReLU()(image_hidden)
 
@@ -255,7 +271,7 @@ class MotionCommandModel:
     def train_model(self, train_dataset, val_dataset, epochs, train_steps, val_steps, initial_learning_rate, decay_steps,
                     decay_rate, minimum_learning_rate, model_save_path, model_name):
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=self.log_dir, histogram_freq=1)
-        self.compile_model()
+        self.compile_model(initial_learning_rate, decay_steps, decay_rate, minimum_learning_rate)
         model_checkpoint_callback = ModelCheckpointEveryN(save_dir=model_save_path, model_name=model_name, save_freq=25)
 
         history = self.model.fit(
