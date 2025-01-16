@@ -303,18 +303,18 @@ class RobileEnv(gym.Env):
         reward = - observation[1][0]
         if self.prev_goal_dist is not None:
             if observation[1][0] > self.prev_goal_dist:
-                reward -= 10
+                reward -= 5
             else:
-                reward += 10
+                reward += 5
         condition = (observation[0] < self.collision_value_threshold) & (observation[0] > 0.05)
         streak = np.convolve(condition, np.ones(self.collision_num_threshold), mode = 'valid')
         if np.any(streak==self.collision_num_threshold)   :
-            reward -= 100
+            reward -= 10
         if np.any(action < self.action_space.low) or np.any(action > self.action_space.high):
             # Penalty for actions outside the defined action space
-            reward -= 50 
+            reward -= 8
         if observation[1][0] < self.goal_reach_threshold:  # Goal reached
-            reward+=80
+            reward+=12
         return reward
 
     def check_done(self, observation):
