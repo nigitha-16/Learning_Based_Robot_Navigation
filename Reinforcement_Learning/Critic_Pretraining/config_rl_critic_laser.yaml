@@ -1,0 +1,17 @@
+root_dir: "/work/nselva2s/rnd"
+tfrecord_file: "robile_data_corr_07112024/tfrecords/corr_07112024_withImages_resized_augmented_Critic.tfrecord"
+pretrained_actor_model_path: "ImitationLearning_models/model_laser_corr07112024_a_model_epoch_200.keras"
+log_dir: "ReinforcementLearning_pretraining_logs/fit/corr07112024_laser_"
+checkpoints_dir: "ReinforcementLearning_pretraining_checkpoints/critic_laser"
+model_name: "pretrained_critic_laser_corr07112024_a"
+model_save_path: "ReinforcementLearning_models"
+
+
+
+train_size: 0.7
+val_size: 0.2
+batch_size: 128
+epochs: 30
+train_steps: 1500
+val_steps: 200
+test_steps: 100

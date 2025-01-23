@@ -188,7 +188,11 @@ class MotionCommandModel:
         goal_hidden = Dense(8, kernel_initializer=HeNormal())(goal_normalized)
         goal_hidden = BatchNormalization()(goal_hidden)
         goal_hidden = LeakyReLU()(goal_hidden)
+        
         goal_hidden = self.residual_block(goal_hidden, 16)
+        goal_hidden = Dense(16, kernel_initializer=HeNormal())(goal_hidden)  # Original third layer
+        goal_hidden = BatchNormalization()(goal_hidden)
+        goal_hidden = LeakyReLU()(goal_hidden)
 
         # Laser processing with original layers and residual learning
         laser_hidden = Dense(128, kernel_initializer=HeNormal())(laser_normalized)
@@ -212,22 +216,18 @@ class MotionCommandModel:
         intermediate_layer = base_model.get_layer('block_13_expand_relu').output
     
         # Add custom convolutional layers on top of the intermediate output
-        x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+        x = Conv2D(64, (3, 3), kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
                    padding='same')(intermediate_layer)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
         x = Dropout(0.2)(x)
         
-        x = Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
+        x = Conv2D(128, (3, 3), kernel_initializer='he_normal', kernel_regularizer=regularizers.l2(1e-5), 
                    padding='same')(x)
         x = BatchNormalization()(x)
         x = LeakyReLU()(x)
         x = Dropout(0.2)(x)
-        
-        x = Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', 
-                   padding='same')(x)
-        x = BatchNormalization()(x)
-        x = LeakyReLU()(x)
+
 
     
         # Global Average Pooling to reduce spatial dimensions
