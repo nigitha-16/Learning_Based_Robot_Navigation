@@ -210,7 +210,7 @@ class VelocityPredictorNode(Node):
         self.cmd_vel_pub.publish(twist_msg)
         self.record_path()
         self.path_pub.publish(self.path_msg)
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     def record_path(self):
         """Record the robot's position and orientation in the path message"""

@@ -75,7 +75,7 @@ class RobileNode(Node):
             LaserScan,
             '/scan',
             self.laser_callback,
-            1)
+            5)
         self.goal_sub = self.create_subscription(
             PoseStamped,
             '/goal_pose',
@@ -86,13 +86,13 @@ class RobileNode(Node):
             Odometry,
             '/odom',
             self.odom_callback,
-            1)
+            5)
         
         self.tf_sub = self.create_subscription(
             TFMessage,
             '/tf',
             self.tf_callback,
-            1)
+            5)
 
         # Publisher for the velocity
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -218,8 +218,8 @@ class RobileEnv(gym.Env):
 
         # Define action space (linear_x, linear_y, angular_z)
         self.action_space = spaces.Box(
-            low=np.array([-0.0001, -0.001, -0.05]),  # action limits
-            high=np.array([0.05, 0.001, 0.05]),
+            low=np.array([-0.0001, -0.03, -0.08]),  # action limits
+            high=np.array([0.08, 0.03, 0.08]),
             dtype=np.float32
         )
         
@@ -228,7 +228,7 @@ class RobileEnv(gym.Env):
         self.prev_goal_dist = None
         self.collision_value_threshold = 0.4 # m
         self.collision_num_threshold = 5 # laser points count
-        self.goal_reach_threshold = 0.3 # m
+        self.goal_reach_threshold = 0.4 # m
 
     def step(self, action):
         """
@@ -240,6 +240,7 @@ class RobileEnv(gym.Env):
         action_clipped = tf.clip_by_value(action, action_low, action_high)
         linear_x, linear_y, angular_z = action_clipped
         self.node.send_command_to_robot(linear_x, linear_y, angular_z)
+        time.sleep(0.5)
         # Wait for new data
         self.node.laser_data = None
         self.node.translation = None
@@ -300,21 +301,21 @@ class RobileEnv(gym.Env):
         Define a reward function based on the robot's state.
         """
         # minimize distance to the goal
-        reward = - observation[1][0]
+        reward = - observation[1][0]*2
         if self.prev_goal_dist is not None:
             if observation[1][0] > self.prev_goal_dist:
-                reward -= 5
+                reward -= 10
             else:
-                reward += 5
+                reward += 10
         condition = (observation[0] < self.collision_value_threshold) & (observation[0] > 0.05)
         streak = np.convolve(condition, np.ones(self.collision_num_threshold), mode = 'valid')
         if np.any(streak==self.collision_num_threshold)   :
-            reward -= 10
+            reward -= 100
         if np.any(action < self.action_space.low) or np.any(action > self.action_space.high):
             # Penalty for actions outside the defined action space
-            reward -= 8
+            reward -= 10
         if observation[1][0] < self.goal_reach_threshold:  # Goal reached
-            reward+=12
+            reward+=120
         return reward
 
     def check_done(self, observation):

@@ -181,7 +181,7 @@ class VelocityPredictorNode(Node):
         goal_input = np.expand_dims(self.goal_data_rel, axis=0)    # Add batch dimension
 
         # Pass the inputs to the model
-        predicted_velocity = self.model.predict([image_input, goal_input])[0]*1.5
+        predicted_velocity = self.model.predict([image_input, goal_input])[0]
         
                 
         print('predicted_velocity ', predicted_velocity)
@@ -194,7 +194,7 @@ class VelocityPredictorNode(Node):
         self.cmd_vel_pub.publish(twist_msg)
         self.record_path()
         self.path_pub.publish(self.path_msg)
-        time.sleep(0.3)
+        time.sleep(0.2)
         
     def record_path(self):
         """Record the robot's position and orientation in the path message"""
